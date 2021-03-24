@@ -1,0 +1,760 @@
+---
+title: "Reanalysis"
+author: "ab"
+date: "3/23/2021"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r}
+require(GEOquery)
+require(tidyverse)
+require(magrittr)
+require(biomaRt)
+require(affy)
+#require(genefilter)
+```
+
+```{r}
+# ------------------------------------------------------------------------------------------------------------------- #
+# use my final set instead
+m_ctrl_hs <- read_tsv("/local/artem/Projects/Draft/Data/Meta/Markers_control.tsv") %>% 
+  filter(Stem_Markers == 1) %>% 
+  pull(gene_id)
+m_ctrl <- read_tsv("../../Data/Meta/Annotation/ESC_markers_score.tsv") %>% 
+  filter(ensembl_gene_id %in% m_ctrl_hs) %>% 
+  pull(mmusculus_homolog_associated_gene_name)
+
+## auxiliary data for probes
+mart <- useMart("ENSEMBL_MART_ENSEMBL")
+mart <- useDataset("mmusculus_gene_ensembl", mart)
+probes <- getBM(
+  mart = mart,
+  attributes = c(
+    "affy_moe430a",
+    "affy_moe430b",
+    "ensembl_gene_id",
+    "gene_biotype",
+    "external_gene_name")
+  ) %>%
+  as_tibble()
+```
+
+```{r}
+# Functions for EB diffe analysis
+load_ann <- function(path_wd) {
+  series_file <- list.files(path = path_wd, pattern = "*_series_matrix.txt", full.names = T)
+  ann <- read_tsv(series_file, col_names = F, skip = 30) %>%
+  dplyr::slice(., 1:2) %>%
+  t() %>% 
+  as_tibble() %>% 
+  dplyr::slice(-1) %>% 
+  `colnames<-`(c("description", "sample_name")) %>% 
+  mutate(description = str_split_fixed(description, ", ", 2)[, 1], 
+         description = str_replace_all(description, " ", "_"), 
+         replicate = str_sub(description, -1, -1),
+         group = str_sub(description, 1, -3), 
+         filename = str_c(sample_name, ".CEL", "")) %>% 
+  dplyr::select(filename, sample_name = description, replicate, group)
+  
+  # Check for the lazy annotation
+  if (grepl("V6.5", path_wd)) {
+    ann <- ann %>% mutate(group = c(rep("V6.5_ES_0h", 3), 
+                                    paste0("V6.5_EB_", rep(c(6, 12, 18, 24, 36, 48), each = 3), "h"), 
+                                    paste0("V6.5_EB_", rep(c(7, 14, 4, 9), each = 3), "d")), 
+                          replicate = rep(c(1, 2, 3), 11), 
+                          sample_name = str_c(group, "_", replicate))
+  }
+  write_tsv(ann, path = file.path(path_wd, "ann.txt"))
+}
+#
+ttest_de <- function(ctrl, trt) {
+  wtab <- inner_join(ctrl, trt)
+  message("testing.....")
+  tt_res <- purrr::map(split(wtab, wtab$probe, drop = F),
+                       function(x) {
+                         ttr <- t.test(x[, (dim(x)[[2]] - 1)], x[, dim(x)[[2]]])
+                         lg2fc_val <- log2(mean(2^x[[(dim(x)[[2]] - 1)]]) / mean(2^x[[dim(x)[[2]]]]))
+                         out <- tibble(gene = unique(x[[1]]),
+                                       comp = str_c(colnames(x[, c((dim(x)[[2]] - 1), dim(x)[[2]])]), collapse = "_vs_"),
+                                       comp1_cts = ttr$estimate[[1]], 
+                                       comp2_cts = ttr$estimate[[2]],
+                                       lg2fc = lg2fc_val, 
+                                       pval = ttr$p.value)
+                       }
+                       ) %>% 
+    purrr::reduce(., rbind) %>% 
+    mutate(padj = p.adjust(pval, method = "BH"))
+}
+#
+compare_to_d0 <- function(bg, comps, tab_tall) {
+  # loop there over time points
+  ctrl <- tab_tall %>% 
+    filter(group == bg) %>% 
+    dplyr::select(probe, rep = replicate, !!sym(bg) := lg2nexp)
+  #
+  #trt <- tab_tall %>% 
+  #  filter(group == comps[1]) %>% 
+  #  dplyr::select(probe, rep = replicate, !!sym(comps[1]) := lg2nexp)
+  
+  tab_der <- purrr::map(comps, 
+                        ~ tab_tall %>% 
+                          filter(group == .x) %>% 
+                          dplyr::select(probe, rep = replicate, !!sym(.x) := lg2nexp) %>% 
+                          ttest_de(ctrl = ctrl, trt = .)) %>% 
+    purrr::reduce(., rbind)
+  return(tab_der)
+}
+#
+process_affy <- function(exp_sets, cline, bg, comps) {
+  path_wd <- file.path("/local/artem/Projects/Draft/Data/Reanalysis/eb_diff", exp_sets[[cline]][1])
+  an <- load_ann(path_wd)
+  pd <- read.AnnotatedDataFrame(file.path(path_wd, "ann.txt"), header = TRUE, sep = "", row.names = 1)
+  raw <- ReadAffy(celfile.path = file.path(path_wd, exp_sets[[cline]][2]), filenames = rownames(pData(pd)), phenoData = pd)
+  
+  # Normalize and log2 transform
+  eset <- rma(raw)
+  exprs(eset) <- log2(exprs(eset))
+  
+  # filter by variance
+  #eset.filt <- varFilter(eset)
+  
+  # get normalized counts as a table
+  tab_tall <- exprs(eset) %>% 
+    as.data.frame() %>% 
+    rownames_to_column(., var = "probe") %>% 
+    as_tibble() %>% 
+    gather(., contains("GSM"), key = "filename", value = lg2nexp) %>% 
+    inner_join(., an, by = "filename") %>% 
+    dplyr::select(contains("affy"), contains("gene"), contains("nexp"), everything())
+  # test DE
+  res_de <- compare_to_d0(bg, comps, tab_tall)
+  return(res_de)
+}
+```
+
+# Analysis of EB differentiation time series
+
+```{r}
+exp_sets <- list("J1" = c("J1", "GSE3749"),
+                 "R1" = c("R1", "GSE2972"),
+                 "V6.5" = c("V6.5", "GSE3231"))
+## setup
+# ------------------------------------------------------------------------------------------------------------------- #
+cline <- "J1"
+# ------------------------------------------------------------------------------------------------------------------- #
+bg <- "J1_ES_0_hr"
+comps <- c("J1_EB_14d")
+#"J1_EB_12_hr", "J1_EB_24h", "J1_EB_48h", "J1_EB_7d"
+# Analysis
+# ------------------------------------------------ #
+res_j1 <- process_affy(exp_sets, cline, bg, comps)
+write_tsv(res_j1, "eb_diff/J1/de_res.tsv")
+
+
+## setup
+# ------------------------------------------------------------------------------------------------------------------- #
+cline <- "R1"
+# ------------------------------------------------------------------------------------------------------------------- #
+bg <- "R1_ES_0h"
+comps <- c("R1_EB_14d")
+#"R1_EB_12h", "R1_EB_24h", "R1_EB_48h", "R1_EB_7d"
+# Analysis
+# ------------------------------------------------ #
+res_r1 <- process_affy(exp_sets, cline, bg, comps)
+write_tsv(res_r1, "eb_diff/R1/de_res.tsv")
+
+
+## setup
+# ------------------------------------------------------------------------------------------------------------------- #
+cline <- "V6.5"
+# ------------------------------------------------------------------------------------------------------------------- #
+bg <- "V6.5_ES_0h"
+comps <- c("V6.5_EB_14d")
+#"V6.5_EB_12h", "V6.5_EB_24h", "V6.5_EB_48h", "V6.5_EB_7d"
+# Analysis
+# ------------------------------------------------ #
+res_v6.5 <- process_affy(exp_sets, cline, bg, comps)
+write_tsv(res_v6.5, "eb_diff/V6.5/de_res.tsv")
+
+
+
+# Test J1
+res_j1 <- read_tsv("eb_diff/J1/de_res.tsv")
+tabs_j1 <- purrr::map(unique(res_j1$comp), 
+                      ~ res_j1 %>% 
+                      filter(comp == .x) %>% 
+                      inner_join(probes, ., by = c("affy_moe430a" = "gene")) %>% 
+                      distinct(ensembl_gene_id, .keep_all = T) %>% 
+                      mutate(exp_sum = comp1_cts + comp2_cts,
+                             exp_dif = comp1_cts - comp2_cts))
+plots_j1 <- purrr::map(tabs_j1, 
+                       ~ ggplot(data = .x, aes(x = exp_sum, y = exp_dif)) + 
+                         geom_point() + 
+                         geom_hline(yintercept = c(0, 0.1, 0.2)) +
+                         geom_vline(xintercept = c(3.0, 3.5)) +
+                         labs(subtitle = unique(.x$comp))
+                       )
+# Test R1
+res_r1 <- read_tsv("eb_diff/R1/de_res.tsv")
+tabs_r1 <- purrr::map(unique(res_r1$comp), 
+                      ~ res_r1 %>% 
+                      filter(comp == .x) %>% 
+                      inner_join(probes, ., by = c("affy_moe430a" = "gene")) %>% 
+                      distinct(ensembl_gene_id, .keep_all = T) %>% 
+                      mutate(exp_sum = comp1_cts + comp2_cts,
+                             exp_dif = comp1_cts - comp2_cts))
+plots_r1 <- purrr::map(tabs_r1, 
+                       ~ ggplot(data = .x, aes(x = exp_sum, y = exp_dif)) + 
+                         geom_point() + 
+                         geom_hline(yintercept = c(0, 0.1, 0.2)) +
+                         geom_vline(xintercept = c(3.0, 3.5)) +
+                         labs(subtitle = unique(.x$comp))
+                       )
+# Test V6.5
+res_v6.5 <- read_tsv("eb_diff/V6.5/de_res.tsv")
+tabs_v6.5 <- purrr::map(unique(res_v6.5$comp), 
+                      ~ res_v6.5 %>% 
+                      filter(comp == .x) %>% 
+                      inner_join(probes, ., by = c("affy_moe430a" = "gene")) %>% 
+                      distinct(ensembl_gene_id, .keep_all = T) %>% 
+                      mutate(exp_sum = comp1_cts + comp2_cts,
+                             exp_dif = comp1_cts - comp2_cts))
+plots_v6.5 <- purrr::map(tabs_v6.5, 
+                       ~ ggplot(data = .x, aes(x = exp_sum, y = exp_dif)) + 
+                         geom_point() + 
+                         geom_hline(yintercept = c(0, 0.1, 0.2)) +
+                         geom_vline(xintercept = c(3.0, 3.5)) +
+                         labs(subtitle = unique(.x$comp))
+                       )
+
+
+# Assemble results
+ed_diff <- purrr::map2(list(tabs_j1[[1]], tabs_r1[[1]], tabs_v6.5[[1]]),
+            c("GSE3749", "GSE2972", "GSE3231"),
+            ~ .x %>% 
+              mutate(dataset = .y) %>% 
+              dplyr::select(gene_id = ensembl_gene_id, gene_name = external_gene_name, dataset, comp, exp_sum, exp_dif)) %>% 
+  purrr::reduce(., rbind)
+#
+write_tsv(ed_diff, "/local/artem/Projects/Draft/Results/results_lines.tsv")
+```
+
+
+
+# Analysis of Embryo cleavage dataset
+
+```{r}
+# Get expression data
+ecleav_dat <- getGEO("GSE1749", GSEMatrix = T)
+eset <- exprs(ecleav_dat[[1]]) %>% 
+  as_tibble(rownames = "affy_moe430a") %>% 
+  pivot_longer(., contains("GSM"), names_to = "sample", values_to = "exp")
+
+# Append annotation and check exp_dif between Blastocyst and Oocyte
+res_ecleav <- eset %>% 
+  inner_join(., 
+             as_tibble(pData(ecleav_dat$`GSE1749-GPL339_series_matrix.txt.gz`))[, c("title", "geo_accession")],
+             by = c("sample" = "geo_accession")) %>% 
+  mutate(title = str_split_fixed(title, " ", 2)[, 1]) %>% 
+  group_by(affy_moe430a, title) %>% 
+  summarise(mean_norm_expr = mean(exp)) %>% 
+  ungroup() %>% 
+  mutate(mean_norm_expr = log2(mean_norm_expr))
+#
+iter <- unique(res_ecleav$title) %>% grep("8-Cell", ., value = T, invert = T)
+#
+tabs_ecleav <- purrr::map(iter, 
+                          ~ res_ecleav %>% 
+                            filter(title %in% c("8-Cell", .x)) %>% 
+                            tidyr::pivot_wider(., names_from = "title", values_from = "mean_norm_expr") %>% 
+                            inner_join(., probes, by = "affy_moe430a") %>% 
+                            mutate(exp_sum = `8-Cell` + !!sym(.x), 
+                                   exp_dif = `8-Cell` - !!sym(.x))) %>% 
+  magrittr::set_names(., iter)
+#
+plots_ecleav <- purrr::map2(tabs_ecleav, 
+                            names(tabs_ecleav), 
+                            ~ ggplot(data = .x, aes(x = exp_sum, y = exp_dif)) + 
+                              geom_point() + 
+                              geom_hline(yintercept = c(0, 0.5, 1)) +
+                              geom_vline(xintercept = c(3.0, 10)) +
+                              labs(subtitle = .y)
+                            )
+
+# Assemble results
+eclev <- tabs_ecleav$Oocyte %>% 
+  mutate(dataset = "GSE1749", 
+         comp = "8-Cell_vs_Oocyte") %>% 
+  dplyr::select(gene_id = ensembl_gene_id, gene_name = external_gene_name, dataset, comp, exp_sum, exp_dif)
+
+write_tsv(eclev, "/local/artem/Projects/Draft/Results/results_eclev.tsv")
+```
+
+
+# Analysis Stemness TFs KDs
+```{r, fig.width=15, fig.height=9}
+# look at expression
+exp_tab <- read_tsv("/local/artem/Projects/Draft/Data/Reanalysis/kd_osnes/GSE26520_Table_data.txt") %>% 
+  dplyr::select(FeatureID, geneSymbol, everything()) %>% 
+  tidyr::pivot_longer(., contains("rep"), names_to = "samples", values_to = "norm_expr") %>% 
+  mutate(samples = str_split_fixed(samples, "_", 2)[, 1]) %>% 
+  group_by(FeatureID, geneSymbol, samples) %>% 
+  summarise(mean_norm_expr = mean(norm_expr), 
+            n_rep = n()) %>% 
+  ungroup()
+#
+ctr <- "Control"
+iter <- unique(exp_tab$samples) %>% grep("Control", ., value = T, invert = T)
+#
+res_osnes <- purrr::map(iter, 
+                        ~ exp_tab %>% 
+                          filter(samples %in% c("Control", .x)) %>% 
+                          dplyr::select(-n_rep) %>% 
+                          tidyr::pivot_wider(., names_from = "samples", values_from = "mean_norm_expr") %>% 
+                          mutate(exp_dif = Control - !!sym(.x), 
+                                 exp_sum = Control + !!sym(.x)
+                                 )
+                        ) %>% 
+  set_names(iter)
+
+
+use <- c("Esrrb", "Pou5f1", "Sall4", "Sox2", "Nanog")
+# #
+plot_osnes <- purrr::map2(res_osnes[use], 
+                          use,
+                          ~ ggplot(data = .x, aes(x = exp_sum, y = exp_dif)) + 
+                            geom_point() + 
+                            geom_hline(yintercept = c(0, 0.1, 0.2)) +
+                            geom_vline(xintercept = c(3, 3.5, 4)) +
+                            labs(subtitle = .y)
+                          )
+
+# Assemble results
+kd_osn <- purrr::map2(res_osnes[use], 
+                      names(res_osnes[use]), 
+            ~ .x %>% mutate(dataset = "GSE26520", 
+                            comp = paste0("mESC_vs_sh", .y, "-mESC")) %>% 
+              inner_join(probes[, c("ensembl_gene_id", "external_gene_name")], ., by = c("external_gene_name" = "geneSymbol")) %>% 
+              dplyr::select(gene_id = ensembl_gene_id, gene_name = external_gene_name, dataset, comp, exp_sum, exp_dif) %>% 
+              unique()
+            ) %>% 
+  purrr::reduce(., rbind)
+
+write_tsv(kd_osn, "/local/artem/Projects/Draft/Results/results_kdosn.tsv")
+```
+
+
+# Analysis of Mouse gene expression atlases
+```{r}
+############################################## ATLAS 2004
+# Annotation is written 
+## Proceed with analyzing CEL files with oligo:: 
+## Then normalize and do the fucking Z scores
+
+### For atlas_2004 Use affy pacakge
+#### Create libraries for chips
+# -------------------------------------------------------------------------------------------------------- #
+# -------------------------------------------------------------------------------------------------------- #
+# -------------------------------------------------------------------------------------------------------- #
+wd <- "/local/artem/Projects/Draft/Data/Reanalysis/atlases/"
+
+#Create CDF packages for chip processing in temporary directory 
+# library(makecdfenv)
+# pkgpath <- tempdir()
+# make.cdf.package("GPL1073.CDF", 
+#                  cdf.path = file.path(wd, "atlas_2004", "GSE1133"), 
+#                  compress = FALSE, 
+#                  species = "Mus_musculus", 
+#                  package.path = pkgpath)
+# make.cdf.package("GPL1074.CDF", 
+#                  cdf.path = file.path(wd, "atlas_2004", "GSE1133"), 
+#                  compress = FALSE, 
+#                  species = "Mus_musculus", 
+#                  package.path = pkgpath)
+
+#Install that package at a terminal using 'pkgpath' from above
+# /usr/bin/R CMD INSTALL /tmp/RtmpZvVua2/gpl1073cdf/
+# /usr/bin/R CMD INSTALL /tmp/RtmpZvVua2/gpl1074cdf/
+
+#Then, load it for use here
+library(gpl1073cdf)
+library(gpl1074cdf)
+library(oligo)
+require(GEOquery)
+
+# Filter samples of platform 1073
+eset <- getGEO("GSE1133", GSEMatrix = TRUE, getGPL = TRUE)
+idx <- grep("GPL1073", attr(eset, "names"))
+eset <- eset[[idx]]
+phenoData(eset)
+files_to_keep <- sampleNames(eset) # keep only cel files from GPL1073 chip
+
+# Read in raw CEL files and annotation data
+## Specify cel files by platform
+### Processing gpl1073
+cels <- list.files(path = file.path(wd, "atlas_2004", "GSE1133"), pattern = "CEL")
+cels_filt <- grep(paste(files_to_keep, collapse = "|"), cels, value = T)
+## Read them in
+pd <- read.AnnotatedDataFrame(file.path(wd, "atlas_2004", "ann_gpl1073.tsv"), header = TRUE, sep = "\t", row.names = 1)
+raw <- ReadAffy(celfile.path = file.path(wd, "atlas_2004", "GSE1133"), 
+                filenames = cels_filt, 
+                phenoData = pd,
+                verbose = T, 
+                cdfname = "gpl1073cdf")
+## perform RMA normalization 
+data_norm = affy::rma(raw)
+exprs(data_norm) <- log2(exprs(data_norm))
+
+# extract into tibble for further analysis
+wtab <- exprs(data_norm) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(., var = "probe") %>% 
+  as_tibble() %>% 
+  gather(., contains("CEL"), key = "filename", value = "log2nexp") %>% 
+  inner_join(., pData(pd) %>% rownames_to_column(var = "filename") %>% as_tibble(), by = "filename") %>%
+  filter(!description %in% c("umbilical cord; E18 embryos", 
+                             "embryo day 10.5", "embryo day 7.5", "embryo day 9.5", "embryo day 6.5", "embryo day 8.5",
+                             "fertilized egg", 
+                             "placenta; females with E18 embryos", 
+                             "testis", "ovary", "oocyte", "thymus", 
+                             "b220+bcell", "cd4+Tcell", "cd8+Tcell")) %>% 
+  group_by(probe, description) %>% 
+  summarise(avg_log2nexp = mean(log2nexp)) %>% 
+  ungroup() 
+
+## read-in gene annotation
+gnf1m_an <- read_tsv("/local/artem/Projects/Draft/Data/Reanalysis/atlases/atlas_2004/GPL1073_noParents.an.txt", skip = 7) %>% 
+  dplyr::select(probe = ProbeName, gene_name = GeneSymbols)
+
+# go for comparisons against all other tissues
+trt <- unique(wtab$description) %>% grep("blastocysts", ., invert = T, value = T)
+res <- purrr::map(trt, 
+                  ~ wtab %>% 
+                    filter(description %in% c("blastocysts",.x)) %>% 
+                    tidyr::pivot_wider(names_from = "description", values_from = "avg_log2nexp") %>% 
+                    inner_join(., gnf1m_an, by = "probe") %>% 
+                    mutate(exp_dif = blastocysts - !!sym(.x), 
+                           exp_sum = blastocysts + !!sym(.x)
+                           ) 
+                  ) %>% 
+  set_names(trt)
+
+plots <- purrr::map2(res,
+                     names(res),
+                    ~ .x %>%
+                      ggplot(data = ., aes(x = exp_sum, y = exp_dif)) +
+                      geom_point() +
+                      geom_hline(yintercept = c(0, 0.1)) +
+                      geom_vline(xintercept = c(5)) +
+                      labs(subtitle = .y)
+                      )
+
+
+# Assemble results
+a04 <- purrr::map2(res, 
+            names(res), 
+            ~ .x %>% 
+              filter(!is.na(gene_name)) %>% 
+              inner_join(probes[, c("ensembl_gene_id", "external_gene_name")], ., by = c("external_gene_name" = "gene_name")) %>% 
+              mutate(dataset = "GSE1133", 
+                     comp = paste0("Blastocyst_vs_", str_remove(gsub(" ", ".", .y), ";"))) %>% 
+              dplyr::select(gene_id = ensembl_gene_id, gene_name = external_gene_name, dataset, comp, exp_sum, exp_dif) %>% 
+              unique()
+            ) %>% 
+  purrr::reduce(., rbind)
+write_tsv(a04, "/local/artem/Projects/Draft/Results/results_a04.tsv")
+```
+
+
+```{r}
+############################################## ATLAS 2008
+##
+probes_08 <- getBM(
+  mart = mart,
+  attributes = c(
+    "affy_mouse430_2",
+    "ensembl_gene_id",
+    "gene_biotype",
+    "external_gene_name")
+  ) %>%
+  as_tibble()
+##
+# Filter samples of platform 
+ann_atlas08 <- read_tsv(file.path(wd, "atlas_2008", "ann.tsv"))
+eset <- getGEO("GSE10246", GSEMatrix = TRUE, getGPL = TRUE)
+eset <- eset[[1]]
+files_to_keep <- sampleNames(eset) 
+
+# Read in raw CEL files and annotation data
+## Specify cel files by platform
+### Processing gpl1073
+cels <- list.files(path = file.path(wd, "atlas_2008", "GSE10246"), pattern = "CEL")
+cels_filt <- grep(paste(files_to_keep, collapse = "|"), cels, value = T)
+## Read them in
+pd <- read.AnnotatedDataFrame(file.path(wd, "atlas_2008", "ann.tsv"), header = TRUE, sep = "\t", row.names = 1)
+raw <- ReadAffy(celfile.path = file.path(wd, "atlas_2008", "GSE10246"), filenames = cels_filt, phenoData = pd, verbose = T)
+
+## perform RMA normalization 
+data_norm = affy::rma(raw)
+exprs(data_norm) <- log2(exprs(data_norm))
+
+# start with Bruce4 keep "embryonic_stem_line_V26_2_p16" for later
+# extract into tibble for further analysis
+wtab <- exprs(data_norm) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(., var = "probe") %>% 
+  as_tibble() %>% 
+  gather(., contains("CEL"), key = "filename", value = "log2nexp") %>% 
+  inner_join(., pData(pd) %>% rownames_to_column(var = "filename") %>% as_tibble(), by = "filename") %>%
+  filter(!(description %in% c("embryonic_stem_line_V26_2_p16", 
+                              "umbilical_cord", "stem_cells__HSC", "placenta", "common_myeloid_progenitor", 
+                              "C2C12", "C3H/10T1/2", "3T3-L1", "Baf3", "nih_3T3", "min6", "mIMCD-3",
+                              "RAW_264_7"))) %>% 
+  group_by(probe, description) %>% 
+  summarise(avg_log2nexp = mean(log2nexp)) %>% 
+  ungroup()
+  
+# go for comparisons against all other tissues
+trt <- unique(wtab$description) %>% grep("embryonic_stem_line_Bruce4_p13", ., invert = T, value = T)
+res <- purrr::map(trt, 
+                  ~ wtab %>% 
+                    filter(description %in% c("embryonic_stem_line_Bruce4_p13",.x)) %>% 
+                    tidyr::pivot_wider(names_from = "description", values_from = "avg_log2nexp") %>% 
+                    inner_join(., probes_08, by = c("probe" = "affy_mouse430_2")) %>% 
+                    mutate(exp_dif = embryonic_stem_line_Bruce4_p13 - !!sym(.x), 
+                           exp_sum = embryonic_stem_line_Bruce4_p13 + !!sym(.x)
+                           ) 
+                  ) %>% 
+  set_names(trt)
+
+plots <- purrr::map2(res,
+                     names(res),
+                    ~ .x %>%
+                      filter(dp_set == T) %>% 
+                      ggplot(data = ., aes(x = exp_sum, y = exp_dif)) +
+                      geom_point() +
+                      geom_hline(yintercept = c(0, 0.1)) +
+                      geom_vline(xintercept = c(5)) +
+                      labs(subtitle = .y)
+                      )
+
+m_a08 <- purrr::map(res, 
+                    ~ .x %>% 
+                      filter(exp_dif > 0.5, exp_sum > 4.5) %>% 
+                      pull(external_gene_name) %>% 
+                      na.omit()) %>% 
+  purrr::reduce(., c) %>% 
+  unique()
+
+# Assemble results
+a08 <- purrr::map2(res, 
+            names(res), 
+            ~ .x %>% 
+              filter(!is.na(external_gene_name)) %>% 
+              mutate(dataset = "GSE10246", 
+                     comp = paste0("mESC_vs_", str_remove(gsub(" ", ".", .y), ";"))) %>% 
+              dplyr::select(gene_id = ensembl_gene_id, gene_name = external_gene_name, dataset, comp, exp_sum, exp_dif) %>% 
+              unique()
+            ) %>% 
+  purrr::reduce(., rbind)
+write_tsv(a08, "/local/artem/Projects/Draft/Results/results_a08.tsv")
+```
+
+```{r}
+## combine and save all results from the datasets analyzed
+dummy <- purrr::map(list.files("/local/artem/Projects/Draft/Results/", pattern = "results_", full.names = T), 
+                    ~ read_tsv(.x, col_names = T)) %>% 
+  purrr::reduce(., rbind) %>% 
+  write_tsv(., "/local/artem/Projects/Draft/Results/results_de.tsv")
+```
+
+## Markers reanalysis
+```{r}
+# {DATA}
+## load full tab
+tab_total <- read_tsv("/local/artem/Projects/Draft/Results/results_de.tsv")
+## load homologs
+mart <- useMart("ENSEMBL_MART_ENSEMBL")
+mart <- useDataset("hsapiens_gene_ensembl", mart)
+raw_tab <- getBM(
+  mart = mart,
+  attributes = c(
+    "ensembl_gene_id",
+    "external_gene_name",
+    "mmusculus_homolog_ensembl_gene",
+    "mmusculus_homolog_associated_gene_name",
+    "mmusculus_homolog_orthology_type")
+  ) %>%
+  as_tibble()
+## control markers
+m_ctrl <- read_tsv("/local/artem/Projects/Draft/Data/Meta/Markers_control.tsv") %>% 
+  filter(Stem_Markers > 0) %>% 
+  pull(gene_name)
+# Load list of tissue-spcific genes and a list of control markers (original)
+st2_tsg_x6 <- read_tsv("/local/artem/Projects/Draft/Data/Meta/PMID31076736_st3_x6.tsv")
+
+## additional sets from msigdb
+library(msigdbr)
+sigs <- list(stem = c("BENPORATH_ES_1", "BHATTACHARYA_EMBRYONIC_STEM_CELL", 
+                      "BOQUEST_STEM_CELL_UP", "BOQUEST_STEM_CELL_DN", "WONG_EMBRYONIC_STEM_CELL_CORE"), 
+             prolif = c("FIRESTEIN_PROLIFERATION", "GOLDRATH_HOMEOSTATIC_PROLIFERATION", "BENPORATH_PROLIFERATION"))
+sigdb <- msigdbr(species = "Homo sapiens", category = "C2")
+stem_msig <- sigdb[sigdb$gs_name %in% sigs$stem, ] %>% 
+  dplyr::select(gene_symbol, gs_name) %>% 
+  split(., .$gs_name) %>% 
+  purrr::map(., 
+             ~ .x %>% pull(gene_symbol))
+prolif_msig <- sigdb[sigdb$gs_name %in% sigs$prolif, ] %>% 
+  dplyr::select(gene_symbol, gs_name) %>% 
+  split(., .$gs_name) %>% 
+  purrr::map(., 
+             ~ .x %>% pull(gene_symbol))
+
+## GOs
+# look at gene ontologies 
+go_path <- "/local/artem/Data/GO/human_GOA/"
+go_l <- purrr::map(c("ensembl2go.tab", "go_description.tab"), 
+                   ~ read_tsv(file.path(go_path, .x), col_names = T))
+```
+
+```{r}
+# {MAIN}
+## CUTOFFS
+ctfs <- list(GSE10246 = c(4.5, 0.1, 1.6), GSE1133 = c(3, 0.05, 1.4),
+             GSE1749 = c(2, 0, 2), 
+             GSE26520 = c(3, 0.05, 5), 
+             GSE2972 = c(3, 0.05, 2), GSE3231 = c(3, 0.05, 2), GSE3749 = c(3, 0.05, 2))
+#
+tab_total.cr <- tab_total %>% 
+  group_by(gene_id, gene_name, dataset, comp) %>% 
+  filter(exp_dif == max(exp_dif)) %>% 
+  ungroup()
+
+#
+m_l <- purrr::map2(split(tab_total.cr, tab_total.cr$dataset),
+                   ctfs,
+                   ~ .x %>%
+                     filter(exp_sum > .y[1], exp_dif > .y[2]) %>% 
+                     group_by(gene_id, gene_name) %>% 
+                     summarize(n_obs = n(), .groups = 'drop') %>% 
+                     filter(n_obs >= (max(n_obs) / .y[3])) %>% 
+                     dplyr::select(gene_name) %>% 
+                     inner_join(raw_tab[, c("external_gene_name", "mmusculus_homolog_associated_gene_name")], 
+                                ., 
+                                by = c("mmusculus_homolog_associated_gene_name" = "gene_name")) %>% 
+                     pull(external_gene_name)
+                   ) %>% 
+  c(., stem_msig)
+# vibe_check
+purrr::map(m_l, 
+           ~ .x %>% 
+             intersect(., m_ctrl) %>% 
+             length(.) %>% 
+             paste0(., "/", length(m_ctrl), "; total of ", length(.x))
+           )
+```
+
+```{r}
+##
+s <- c("GSE10246", "GSE2972", "GSE1133", "GSE26520", "GSE3231", "GSE3749")
+m_t <- m_l[s] %>% purrr::reduce(., intersect)
+markers_ctrl <- read_tsv("/local/artem/Projects/Draft/Data/Meta/Markers_control.tsv")
+markers_test <- markers_ctrl %>% 
+  mutate(Stem_Markers = ifelse((gene_name %in% m_t), 
+                               1, 
+                               0)
+         )
+```
+
+```{r}
+## look at GOs
+dummy_ctrl <- markers_ctrl[markers_ctrl$Stem_Markers == 1, ] %>% 
+  dplyr::select(gene_id, gene_name) %>% 
+  inner_join(., go_l[[1]], by = c("gene_id" = "ensg")) %>% 
+  group_by(go_term) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  inner_join(., go_l[[2]], by = "go_term") %>% 
+  filter(n > 1, 
+         !grepl(pattern = "mitotic|cycle",x = description, ignore.case = T))
+# dummy_test <- markers_test[markers_test$Stem_Markers == 1, ] %>% 
+#   dplyr::select(gene_id, gene_name) %>% 
+#   inner_join(., go_l[[1]], by = c("gene_id" = "ensg")) %>% 
+#   group_by(go_term) %>% 
+#   summarise(n = n()) %>% 
+#   ungroup() %>% 
+#   inner_join(., go_l[[2]], by = "go_term") %>% 
+#   filter(n > 1)
+
+## filter out GOs 
+m_t_gof <- markers_test[markers_test$Stem_Markers == 1, ] %>% 
+  dplyr::select(gene_id, gene_name) %>% 
+  inner_join(., go_l[[1]], by = c("gene_id" = "ensg")) %>% 
+  filter(go_term %in% dummy_ctrl$go_term) %>% 
+  distinct(gene_name) %>% 
+  pull(gene_name)
+
+## update GO filter
+markers_test <- markers_test %>% 
+  mutate(Stem_Markers = ifelse(gene_name %in% m_t_gof, 1, 0))
+sum(markers_test$Stem_Markers)
+```
+
+```{r}
+## base size of the resulting set
+sum(markers_test$Stem_Markers)
+
+## add genes manually selected by DP
+old_set <- read_tsv("/local/artem/Projects/Draft/Data/Meta/Annotation/ESC_markers_score.tsv", 
+                    col_types = 
+cols(
+  ensembl_gene_id = col_character(),
+  hgnc_symbol = col_character(),
+  mmusculus_homolog_ensembl_gene = col_character(),
+  mmusculus_homolog_associated_gene_name = col_character(),
+  mmusculus_homolog_orthology_type = col_character(),
+  GeneID = col_double(),
+  Score = col_double(),
+  Old_list = col_double(),
+  Atlas = col_double(),
+  `ED-diff` = col_double(),
+  `Embryo-cleav` = col_double(),
+  `KD-OSNES` = col_double(),
+  Screens = col_double()
+)) %>% 
+  filter(Old_list > 0) %>% 
+  pull(hgnc_symbol)
+markers_test[markers_test$gene_name %in% old_set, ]$Stem_Markers <- 1
+sum(markers_test$Stem_Markers)
+
+## filter out tissue specific genes
+markers_test[markers_test$gene_name %in% st2_tsg_x6$gene, ]$Stem_Markers <- 0
+sum(markers_test$Stem_Markers)
+
+## filter out our proliferation signature
+markers_test[markers_test$gene_name %in% markers_test[markers_test$Prolif_Markers == 1, ]$gene_name, ]$Stem_Markers <- 0
+sum(markers_test$Stem_Markers)
+
+## filter by msigdb proliferation sets
+markers_test <- markers_test %>% 
+  mutate(Stem_Markers = ifelse(gene_name %in% (purrr::reduce(prolif_msig, union)), 0, Stem_Markers))
+sum(markers_test$Stem_Markers)
+
+## add genes manually selected by DP
+old_set <- read_tsv("/local/artem/Projects/Draft/Data/Meta/Annotation/ESC_markers_score.tsv") %>% 
+  filter(Old_list > 0) %>% 
+  pull(hgnc_symbol)
+markers_test[markers_test$gene_name %in% old_set, ]$Stem_Markers <- 1
+sum(markers_test$Stem_Markers)
+
+## remove SOX2 because of the lung and brain cancers bias (LUSC; GBM SOX2 dependency)
+markers_test[markers_test$gene_name == "SOX2", ]$Stem_Markers <- 0
+sum(markers_test$Stem_Markers)
+
+write_tsv(markers_test, "/local/artem/Projects/Draft/Data/Meta/Markers.tsv")
+```

@@ -1,0 +1,666 @@
+---
+title: |
+  | \vspace{5cm} Transcriptome analysis reveals high tumor heterogeneity with respect to re-activation of stemness and proliferation programs
+  | \vspace{5cm} \LARGE{Figures}
+author: "ab"
+date: '`r format(as.POSIXct(if ("" != Sys.getenv("SOURCE_DATE_EPOCH")) { as.numeric(Sys.getenv("SOURCE_DATE_EPOCH")) } else { Sys.time() }, origin="1970-01-01"), "%Y-%m-%d %H:%M:%S")`'
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+# ---------------------------------------------------------------------------- #
+# knit settings
+knitr::opts_chunk$set(echo = FALSE)
+
+# Global settings
+set.seed(42)
+shortcut <- TRUE
+base.size <- 14
+sox_incl <- FALSE
+cor.v <- 1
+```
+
+```{r libraries, include=FALSE}
+# ---------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------- #
+# packages
+require(tidyverse)
+require(magrittr)
+require(janitor)
+require(ggrepel)
+require(RColorBrewer)
+require(reshape2)
+require(patchwork)
+
+# ---------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------- #
+# paths
+f_path <- file.path("/home", "abarano", "Scripts", "Scripts", "Draft")
+a_path <- file.path("/home", "abarano", "Scripts", "Utility")
+res_path <- file.path("/local", "artem", "Projects", "Draft", "Results")
+
+# ---------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------- #
+# functinos
+#source(file.path(f_path, "F_stemtcga.R"))
+source(file.path(f_path, "F_auxiliary.R"))
+source(file.path(f_path, "F_plotting.R"))
+source(file.path(a_path, "F_miscellaneous.R"))
+```
+
+```{r}
+# -----------fix from 09/06/20
+ # data_total <- load_data(short = FALSE)
+```
+
+```{r, eval=FALSE}
+# ------fix from 16/08/20
+## Update STEM table
+#marker genes were recomputed manaully with clearly defined cutoffs from datasets preselcted by DP.
+#update subsetted tables according to the new set of genes
+# data_path <- file.path("/local", "artem", "Projects", "Draft", "Data", "Counts")
+# t_paths <- c("stem_counts_table.tsv",
+#              "prolif_counts_table.tsv",
+#              "emt_counts_table.tsv"
+#              )
+# #
+# total_tab <- read_tsv("/local/artem/Projects/Draft/Data/Counts/total_norm_counts.tsv")
+# m_ts <- purrr::map(c("Stem", "Prolif", "Emt"),
+#                    ~ subset_exp(total_tab,
+#                                 markers = markers_test,
+#                                 meta = data_total$Meta,
+#                                 gene_set = .x)
+#                    )
+# dummy <- purrr::map2(m_ts,
+#                      t_paths,
+#                      ~ write_tsv(.x, file.path(data_path, .y), col_names = T)
+#                      )
+```
+
+
+```{r}
+# micro test: compute R-squared betwen expression and CPE for all genes
+# t_tt <- read_tsv("/local/artem/Projects/Draft/Data/Counts/total_norm_counts_t.tsv")
+# purity <- data_total$Purity
+# 
+# data.tum.reg <- t_tt %>% 
+#         filter(sample_type %in% c('Additional - New Primary', 'Additional Metastatic', 'Metastatic', 
+#                                   'Recurrent Solid Tumor', "Primary solid Tumor")) %>%
+#         inner_join(purity[, c("cases", "purity")], ., by = c("cases")) %>%
+#         mutate(purity = as.numeric(purity)) %>% 
+#         filter(purity != "NaN") %>% 
+#         distinct(cases, .keep_all = TRUE)
+# #
+# v_r <- numeric()
+# for (x in 1:length(names(data.tum.reg %>% dplyr::select(starts_with("ENSG"))))) {
+#         v_r[x] <- cor(data.tum.reg[[x + 7]], data.tum.reg$purity)
+#         lm.fit <- lm(data.tum.reg[[x + 7]] ~ purity, 
+#                      data = data.tum.reg, 
+#                      na.action = "na.exclude"
+#         )
+#         # Correct tumor samples
+#         data.tum.reg[[(x + 7)]] <- data.tum.reg[[(x + 7)]] - data.tum.reg[['purity']] * lm.fit$coefficients[[2]]
+#       }
+# 
+# v_rc <- numeric()
+# for (i in 1:length(names(data.tum.reg %>% dplyr::select(starts_with("ENSG"))))) {
+#   v_rc[i] <- cor(data.tum.reg[[i + 7]], data.tum.reg$purity)
+# }
+
+```
+
+```{r loading and computing, include=FALSE}
+# ---------------------------------------------------------------------------- #
+# load preprocessed data
+# ---------------------------------------------------------------------------- #
+data_total <- load_data(short = TRUE)
+exp_tables <- data_total$Norm_Counts
+```
+
+\newpage
+# Figure 1
+```{r}
+## additional sets from msigdb
+library(msigdbr)
+sigs <- list(stem = c("BENPORATH_ES_1", "BHATTACHARYA_EMBRYONIC_STEM_CELL", "WONG_EMBRYONIC_STEM_CELL_CORE"), 
+             prolif = c("FIRESTEIN_PROLIFERATION", "GOLDRATH_HOMEOSTATIC_PROLIFERATION", "BENPORATH_PROLIFERATION"))
+sigdb <- msigdbr(species = "Homo sapiens", category = "C2")
+stem_msig <- sigdb[sigdb$gs_name %in% sigs$stem, ] %>% 
+  dplyr::select(gene_symbol, gs_name) %>% 
+  split(., .$gs_name) %>% 
+  purrr::map(., 
+             ~ .x %>% pull(gene_symbol))
+prolif_msig <- sigdb[sigdb$gs_name %in% sigs$prolif, ] %>% 
+  dplyr::select(gene_symbol, gs_name) %>% 
+  split(., .$gs_name) %>% 
+  purrr::map(., 
+             ~ .x %>% pull(gene_symbol))
+
+markers_test <- data_total$Markers
+markers_ctrl <- read_tsv("/local/artem/Projects/Draft/Data/Meta/Markers_control.tsv", 
+                         col_types = cols(.default = col_number(), gene_id = col_character(), gene_name = col_character()))
+```
+
+```{r, fig.width=5.6, fig.height=4.6}
+# intersection plot
+sigs <- list(`This study Stemness` = unique(markers_test[markers_test$Stem_Markers == 1, ]$gene_name), 
+             `Papatsenko ESC` = markers_ctrl[markers_ctrl$Stem_Markers == 1, ]$gene_name, 
+             `BenPorath ESC` = stem_msig$BENPORATH_ES_1, 
+             `Bhattacharya ESC` = stem_msig$BHATTACHARYA_EMBRYONIC_STEM_CELL,
+             `Wong ESC` = stem_msig$WONG_EMBRYONIC_STEM_CELL_CORE
+             )
+grid <- expand_grid(x = names(sigs), y = names(sigs))
+tab <- grid %>% 
+  mutate(xl = purrr::map(1:dim(grid)[[1]],
+                         ~length(sigs[[grid[.x, ]$x]])) %>% unlist(), 
+         yl = purrr::map(1:dim(grid)[[1]],
+                         ~length(sigs[[grid[.x, ]$y]])) %>% unlist(),
+         i = purrr::map(1:dim(grid)[[1]],
+                        ~ intersect(sigs[[grid[.x, ]$x]], sigs[[grid[.x, ]$y]]) %>% length()) %>% unlist(), 
+         iperc = (i / yl) * 100, 
+         x = factor(x, 
+                    levels = names(sigs)), 
+         y = factor(y, 
+                    levels = names(sigs))
+         )
+figure_1 <- ggplot(data = tab, aes(x = x, y = y, fill = iperc)) + 
+  geom_tile(color = "black", 
+            width = 0.96, height = 0.96) +
+  geom_text(aes(label = paste0(i))) +
+  scale_fill_gradient(name = "Intersection, %", low = "palegoldenrod", high = "orangered2", na.value = NA, limits = c(0, 100)) +
+  labs(x = "", y = "") +
+  theme_tcga(base_size = 13) + 
+  theme(axis.text.y = element_text(angle = 0))
+# ---------------------------------------------------------------------------- #
+ggsave(filename = file.path(res_path, "Figures", "Figure_1_raw.pdf"), 
+       plot = figure_1,
+       width = 5.6, height = 4.6, units = "in", dpi = 320)
+# ---------------------------------------------------------------------------- #
+figure_1
+```
+
+\newpage
+# Figure 2
+```{r, echo=FALSE, warning=FALSE, fig.width=6.8, fig.height=4.6}
+# ---------------------------------------------------------------------------- #
+# regress out effects of tumor purtiy
+# ---------------------------------------------------------------------------- #
+exp_corrected <- purrr::map(exp_tables, 
+                            function(x) correct_cpe(x, 
+                                                    purity = data_total$Purity, 
+                                                    correct = TRUE, 
+                                                    version = 1)
+                            )
+
+# ---------------------------------------------------------------------------- #
+# prepare PCAs
+# ---------------------------------------------------------------------------- #
+pca_tables_cor <- purrr::map(exp_corrected, 
+                             function(x) do_pca(x))
+
+
+# ------------------------------------------------------------------------------------------ #
+# panel 1
+# ------------------------------------------------------------------------------------------ #
+f2 <- purrr::map2(.x = c(1, 1, 2, 2, 3, 3), 
+                  .y = c(F, T, F, T, F, T), 
+                  .f = function(x, y) plot_nice_pca(pca_tables_cor[[x]], 
+                                                    pcs = c('PC1', 'PC2'), 
+                                                    density = y,  
+                                                    base_size = 8))
+# ---------------------------------------------------------------------------- #
+figure_2 <- ((f2[[1]] + labs(title = "A") | 
+                f2[[3]] + labs(title = "B") | 
+                f2[[5]] + labs(title = "C"))) /
+  (f2[[2]] | f2[[4]] | f2[[6]]) + 
+  plot_layout(guides = "collect")
+
+# figure_2 <- (((f2[[1]] / f2[[2]])) | 
+#                ((f2[[3]] / f2[[4]])) | 
+#                ((f2[[5]] / f2[[6]]))
+#              ) + 
+#   plot_layout(guides = "collect") + 
+  
+# ---------------------------------------------------------------------------- #
+ggsave(filename = file.path(res_path, "Figures", "Figure_2_raw.pdf"), 
+       plot = figure_2,
+       width = 6.8, height = 4.6, units = "in", dpi = 320)
+# ---------------------------------------------------------------------------- #
+figure_2
+```
+
+\newpage
+# Figure 3
+```{r, echo=FALSE, warning=FALSE, fig.width=6.8, fig.height=5.4}
+# ---------------------------------------------------------------------------- #
+# compute global clusters
+# ---------------------------------------------------------------------------- #
+cluster_cor <- purrr::map2(pca_tables_cor, 
+                           c(T, T, F),
+                           ~ get_clusters(.x[[1]], reverse = .y))
+#ifelse(x[[1]]$gene_set[1] == "Stemness" | x[[1]]$gene_set[1] == "Proliferation", 
+#       TRUE, 
+#       FALSE)
+#
+# "Project-wise distribution\nof samples\nbetween clusters"
+
+
+# ------------------------------------------------------------------------------------------ #
+# panel 2
+# ------------------------------------------------------------------------------------------ #
+f3 <- purrr::map2(.x = c(1, 2, 3), 
+                  .y = c("bottom", "bottom", "bottom"), 
+                  .f = function(x, y) plot_nice_jitter(pca_tables_cor[[x]][[1]], 
+                                                       cluster_cor[[x]], 
+                                                       legend.position = y, 
+                                                       legend.direction = "horizontal", 
+                                                       aspect.ratio = 3.4, 
+                                                       base_size = 8))
+# ---------------------------------------------------------------------------- #
+figure_3 <- (f3[[1]] | f3[[2]] | f3[[3]]) + 
+  plot_layout(guides = "collect") + 
+  plot_annotation(tag_levels = "A") & theme(legend.position = 'bottom')
+
+# ---------------------------------------------------------------------------- #
+ggsave(filename = file.path(res_path, "Figures", "Figure_3_raw.pdf"), 
+       plot = figure_3,
+       width = 6.8, height = 5.4, units = "in", dpi = 320)
+# ---------------------------------------------------------------------------- #
+figure_3
+```
+
+\newpage
+# Figure 4
+```{r, echo=FALSE, warning=FALSE, fig.width=4.8, fig.height=5}
+# ------------------------------------------------------------------------------------------ #
+# panel 2
+# ------------------------------------------------------------------------------------------ #
+f4_dp <- plot_nice_scatter(cluster_cor[[1]], cluster_cor[[2]], 
+                          pca_tables_list = pca_tables_cor,
+                          purity = data_total$Purity, 
+                          meta = data_total$Meta, 
+                          comp_medians = FALSE,
+                          col_var = "stage_avg", 
+                          shape_var = "purity", 
+                          base_size = 8)
+f4_hm <- plot_nice_heatmap(cluster_cor[[1]], cluster_cor[[2]],
+                          pca_tables_list = pca_tables_cor, 
+                          comp_medians = FALSE,
+                          aspect.ratio = 0.125, 
+                          base_size = 8)
+# ---------------------------------------------------------------------------- #
+figure_4 <- (f4_dp + f4_hm) + 
+  plot_layout(nrow = 2, heights = c(4, 1)) + 
+  plot_annotation(tag_levels = "A")
+# ---------------------------------------------------------------------------- #
+ggsave(filename = file.path(res_path, "Figures", "Figure_4_raw.pdf"),
+       plot = figure_4,
+       width = 4.8, height = 5, units = "in", dpi = 320)
+# ---------------------------------------------------------------------------- #
+figure_4
+```
+
+
+```{r}
+# Update from 27/04/20
+# ---------------------------------------------------------------------------- #
+# compute clusters per project- schematic
+# ---------------------------------------------------------------------------- #
+plot_nice_jitter_ind <- function(pca_table, cluster_table, pc = 1, ...) {
+  #Correct project names
+  pca_table %<>% mutate(project_id = str_remove_all(project_id, "TCGA-"))
+  cluster_table %<>% mutate(project_id = str_remove_all(project_id, "TCGA-"))
+  
+  #Join
+  table_clust <- pca_table %>% 
+    dplyr::select(gene_set, cases, project_id, sample_type, site_of_resection_or_biopsy, primary_diagnosis, gender, 
+                  !! sym(paste0("PC", pc))) %>% 
+    full_join(cluster_table, 
+              ., 
+              by = c("cases", "project_id", "sample_type")) %>% 
+    mutate(!! sym(pca_table[[1]][1]) := ifelse(sample_type == "Solid Tissue Normal", "Solid Tissue Normal", 
+                                               ifelse(project_id == "Differentiating iPSC", "Differentiating iPSC", 
+                                                      !! sym(pca_table[[1]][1]))), 
+           project_id = ifelse(project_id == "Differentiating iPSC" | sample_type == "Solid Tissue Normal", sample_type, project_id))
+  #Median
+  if (pca_table$gene_set[[1]] == "EMT_MET") {
+    median_tum <- -5
+  } else {
+    median_tum <- table_clust %>% 
+      filter(!sample_type %in% c("iPSC", "Primitive Streak", "Endoderm Progenitors", "Definitive Endoderm", "Solid Tissue Normal")) %>% 
+      pull(!! sym(paste0("PC", pc))) %>% 
+      median(., na.rm = TRUE)
+  }
+  #Sort
+  table_clust_order <- table_clust %>% 
+    filter(!sample_type %in% c("iPSC", "Primitive Streak", "Endoderm Progenitors", "Definitive Endoderm", "Solid Tissue Normal")) %>%
+    group_by(project_id) %>% 
+    summarise(median_pc1 = median(!! sym(paste0("PC", pc))), .groups = "drop") %>% 
+    arrange(median_pc1)
+  table_clust_order <- c('iPSC',
+                         'Primitive Streak', 
+                         'Endoderm Progenitors', 
+                         'Definitive Endoderm', 
+                         table_clust_order$project_id, 
+                         'Solid Tissue Normal')
+  table_clust <- table_clust %>% 
+    mutate(project_id = factor(project_id, levels = table_clust_order))
+  #Plot
+  ggobj <- ggplot() + 
+    geom_jitter(data = table_clust, 
+                aes(x = project_id, 
+                    y = !! sym(paste0("PC", pc)), 
+                    group = project_id, 
+                    col = !! sym(table_clust[[5]][1])
+                    ), 
+                size = 0.7, 
+                alpha = 0.3) + 
+    scale_color_manual(values = c("#CD5C5C", "#fc4a1a", "#F8AA38", "#83a9c1", "#f7b733")) + 
+    #geom_hline(aes(yintercept = ), yintercept = median_tum, size = 1, color = "grey30") + 
+    geom_crossbar(data = table_clust %>% group_by(project_id) %>% summarise(median_pc1 = median(PC1), .groups = "drop"), 
+                  aes(x = project_id, 
+                      y = median_pc1,
+                      ymin = median_pc1, 
+                      ymax = median_pc1),
+                  size = 0.25,
+                  col = c(rep(NA, 4), rep("black", 19), NA), 
+                  width = 0.8) +
+    guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+    theme_tcga(...) +
+    labs(#title = paste0(table_clust[[5]][1], "\nsignature"),
+         color = "", 
+         y = paste0("PC", pc), 
+         x = "")
+  return(ggobj)
+}
+
+```
+
+\newpage
+# Figure 5
+```{r, echo=FALSE, warning=FALSE, fig.width=5.5, fig.height=6.7}
+# ---------------------------------------------------------------------------- #
+# compute clusters per project
+# ---------------------------------------------------------------------------- #
+theme_tcga <- function(base_family = "sans", legend.position = "right", legend.direction = "vertical", 
+                       angle.t.x = 45, angle.t.y = 45, ...){
+  theme_bw(base_family = base_family, ...) + 
+    theme(text = element_text(colour = "#333333", hjust = 1),
+          legend.position = legend.position,
+          legend.direction = legend.direction,
+          legend.background = element_rect(fill = alpha('white', 0.1)),
+          axis.text.y = element_text(angle = angle.t.y, margin = unit(c(0.3, 0.3, 0.3, 0.3), "cm")),
+          axis.text.x = element_text(angle = angle.t.x, margin = unit(c(0.3, 0.3, 0.3, 0.3), "cm")),
+          axis.line = element_line(colour = "black"),
+          axis.ticks.length = unit(-0.05, "in"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(), 
+          panel.background = element_rect(fill = "white", 
+                                          colour = "white",
+                                          size = 0.5, 
+                                          linetype = "solid"))
+}
+
+
+
+cluster_cor_ind <- purrr::map2(pca_tables_cor, 
+                               c(T, T, F),
+                               ~ get_clusters(.x[[1]], 
+                                              reverse = .y,
+                                              individual = TRUE)
+                                              )
+# pca_tables <- purrr::map(exp_tables, 
+#                          function(x) do_pca(x))
+# 
+# cluster_ind <- purrr::map2(pca_tables, 
+#                                c(F, T, F),
+#                                ~ get_clusters(.x[[1]], 
+#                                               reverse = .y,
+#                                               individual = TRUE)
+#                                               )
+# tst <- plot_surv_boxplots(cluster_table = cluster_ind$stem_counts_table, 
+#                    meta = data_total$Meta, 
+#                    aspect.ratio = 1, 
+#                    base_size = base.size)
+
+
+# ---------------------------------------------------------------------------- #
+# stratify tumors into quandrants
+# ---------------------------------------------------------------------------- #
+f4_supp <- f4_dp$data %>% 
+  mutate(quadrant = ifelse(Stemness_Intensity > 0.5 & Proliferation_Intensity > 0.5, "top_right", "bottom_left"))
+cluster_cor_ind_f5 <- cluster_cor_ind[1:2] %>% purrr::map(., 
+                                                          ~ .x %>% 
+                                                            mutate(project_id = str_remove_all(project_id, "TCGA-")) %>% 
+                                                            inner_join(., f4_supp, by = "project_id") %>% 
+                                                            split(., .$quadrant)
+                                                          )
+# write_tsv(f3_supp, "/local/artem/Projects/Draft/Data/Meta/Tumor_Ann.tsv")
+# ------------------------------------------------------------------------------------------ #
+# panel 4
+# ------------------------------------------------------------------------------------------ #
+f5 <- purrr::map(cluster_cor_ind_f5, 
+                 ~ purrr::map(.x, 
+                              function(x) plot_surv_boxplots(cluster_table = x, 
+                                                             meta = data_total$Meta, 
+                                                             base_size = 8)
+                              )
+                 )
+
+# ---------------------------------------------------------------------------- #
+# deprecated since 27/04/20
+# ---------------------------------------------------------------------------- #
+#figure_4 <- (((f4[[1]][[1]] | f4[[1]][[2]]) + plot_layout(tag_level = "new")) / ((f4[[2]][[1]] | f4[[2]][[2]]) + plot_layout(tag_level = "new"))) +
+#  plot_layout(guides = "collect") + 
+#  plot_annotation(tag_levels = "A") & 
+#  theme(plot.tag = element_text(size = 16))
+# ---------------------------------------------------------------------------- #
+#ggsave(filename = file.path(res_path, "Figures", "Figure_4.pdf"), 
+#       plot = figure_4,
+#       width = 10, height = 6, units = "in", dpi = 320)
+
+
+# ------------------------------------------------------------------------------------------------------- #
+# use this since 27/04/20
+# ------------------------------------------------------------------------------------------------------- #
+f5_tab <- list(f5$stem_counts_table$bottom_left$data %>% mutate(signature = "stemness", quadrant = "Bottom-left"), 
+               f5$stem_counts_table$top_right$data %>% mutate(signature = "stemness", quadrant = "Top-right"), 
+               f5$prolif_counts_table$bottom_left$data %>% mutate(signature = "proliferation", quadrant = "Bottom-left"),
+               f5$prolif_counts_table$top_right$data %>% mutate(signature = "proliferation", quadrant = "Top-right")
+               ) %>% 
+  purrr::reduce(., rbind)
+
+# ---------------------------------------------------------------------------- #
+#Prepare palette
+palette <- c("#F8AA38","#5A92B7", "grey80")
+# ---------------------------------------------------------------------------- #
+# Plot
+# -------------------------------------------- #
+# Eplanation plot
+f5_explanations <- plot_nice_jitter_ind(pca_table = pca_tables_cor[[1]][[1]], 
+                                        cluster_table = cluster_cor_ind[[1]], 
+                                        pc = 1, 
+                                        #aspect.ratio = 0.35, 
+                                        base_size = 8)
+
+# -------------------------------------------- #
+# boxplots
+f5_boxes <- ggplot(f5_tab, 
+                  aes(y = `exp(coef)`, 
+                      x = TCGA_project, 
+                      color = `Risk of Adverse Event`)
+                  ) + 
+    geom_point(shape = 15, size = 2) +
+    geom_errorbar(aes(ymin = `lower .95`, ymax = `upper .95`), 
+                  width = .2, 
+                  position = position_dodge(0.05)
+                  ) + 
+    scale_color_manual(values = palette, drop = FALSE) +
+    geom_text(aes(label = Significance, x = TCGA_project, y = `upper .95`), 
+              hjust = 0.5, 
+              nudge_x = 0,
+              nudge_y = 0.8,
+              size = 2.3, 
+              color = "black") +
+    geom_hline(yintercept = 1, color = "red", size = 0.5) + 
+    facet_grid(signature ~ quadrant, scales = "free") +
+    ylim(c(0, 10)) +
+    xlab(NULL) +
+    ylab("Hazard Ratio") +
+    #coord_flip(ylim = c(0, 10)) +
+    theme_tcga(base_size = 8) +
+    theme(axis.title.x = element_blank(),
+          axis.text.x = element_blank()
+          )
+
+# -------------------------------------------- #
+# Annotation plot
+f5_ann <- f4_supp %>% 
+  filter(project_id %in% (f5_boxes$data$TCGA_project %>% unique())) %>%
+  mutate(y_art = "y") %>% 
+  ggplot(data = ., 
+         aes(x = project_id, 
+             y = y_art, 
+             color = stage_avg_factorial, 
+             shape = purity_factorial)) + 
+  geom_point(size = 3) + 
+  scale_y_discrete() +
+  facet_grid(. ~ quadrant, scales = "free") +
+  labs(y = "", x = "",
+       color = "Average\nproject-wise\ntumor stage", 
+       shape = "Median\nproject-wise\npurity") +
+  theme_tcga(base_size = 8) + 
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(), 
+        strip.background = element_blank(),
+        strip.text.x = element_blank()
+        )
+
+# --------------------------------------------- #
+figure_5 <- (f5_explanations + f5_boxes + f5_ann) + 
+  plot_layout(nrow = 3, 
+              guides = "collect", heights = c(0.4, 1.2, 0.2)) + 
+  plot_annotation(tag_levels = list(c("A", "B", "")))
+
+# ---------------------------------------------------------------------------- #
+ggsave(filename = file.path(res_path, "Figures", "Figure_5_raw.pdf"), 
+       plot = figure_5,
+       width = 5.5, height = 6.7, units = "in", dpi = 320)
+# ---------------------------------------------------------------------------- #
+figure_5
+```
+
+```{r, fig.width=5.7, fig.height=6}
+f5_boxes / f5_ann
+```
+
+
+
+```{r, fig.height=9.7, fig.width=6.5}
+figure_5
+```
+
+
+
+```{r}
+#check survival separately for subtypes of BRCA
+# sbt.brca <- TCGAbiolinks::TCGAquery_subtype(tumor = "brca")
+# 
+# cluster_cor_ind_f5$stem_counts_table$bottom_left %>% 
+#   mutate(cs.id = str_split_fixed(cases, "-01", 2)[, 1]) %>% 
+#   inner_join(sbt.brca[, c("patient", "BRCA_Subtype_PAM50")], ., by = c("patient" = "cs.id")) %>% 
+#   tabyl(BRCA_Subtype_PAM50, Stemness)
+
+```
+
+
+<!-- \newpage -->
+<!-- # Figure 6 -->
+```{r, echo=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# ------------------------------------------------------------------------------------------ #
+# panel 5
+# ------------------------------------------------------------------------------------------ #
+# f6_s <- purrr::map(c("SKCM", "LIHC", "KIRC"), 
+#                    ~ plot_nice_curves(cluster_cor_ind[["stem_counts_table"]], 
+#                                       meta = data_total$Meta, 
+#                                       project = .x, 
+#                                       legend.position = "right",
+#                                       base_size = base.size))
+# f6_p <- purrr::map(c("SKCM", "LIHC", "KIRC"), 
+#                    ~ plot_nice_curves(cluster_cor_ind[["prolif_counts_table"]], 
+#                                       meta = data_total$Meta, 
+#                                       project = .x, 
+#                                       legend.position = "right",
+#                                       base_size = base.size))
+# # ---------------------------------------------------------------------------- #
+# figure_6 <- (((f6_s[[1]] / f6_p[[1]]) + plot_layout(tag_level = "new")) | 
+#   ((f6_s[[2]] / f6_p[[2]]) + plot_layout(tag_level = "new")) |
+#   ((f6_s[[3]] / f6_p[[3]]) + plot_layout(tag_level = "new"))) + 
+#   plot_layout(guides = "collect") + 
+#   plot_annotation(tag_levels = c("A", "1")) & 
+#   theme(plot.tag = element_text(size = 16))
+# # ---------------------------------------------------------------------------- #
+# ggsave(filename = file.path(res_path, "Figures", "Figure_6_raw.pdf"), 
+#        plot = figure_6,
+#        width = 12, height = 8, units = "in", dpi = 320)
+# # ---------------------------------------------------------------------------- #
+# figure_6
+```
+
+
+```{r, eval=FALSE}
+# Update from 27/04/20
+# What about subtypes?
+# subtypes_atlas <- TCGAbiolinks::PanCancerAtlas_subtypes() %>% mutate(pan.samplesID = str_sub(pan.samplesID, 1, 12))
+# 
+# # ---------------------------------------------------------------------------- #
+# # compute clusters per project
+# # ---------------------------------------------------------------------------- #
+# cluster_cor_ind <- purrr::map(pca_tables_cor, 
+#                               function(x) get_clusters(x[[1]], 
+#                                                        reverse = FALSE,
+#                                                        individual = TRUE)
+#                                                        )
+# 
+# # ---------------------------------------------------------------------------- #
+# # stratify tumors into quandrants
+# # ---------------------------------------------------------------------------- #
+# f3_supp <- f3_dp$data %>% 
+#   mutate(quadrant = ifelse(Stemness_Intensity > 0.5, "top-right", "bottom-left"))
+# cluster_cor_ind <- cluster_cor_ind[1:2] %>% purrr::map(., 
+#                                                        ~ .x %>% 
+#                                                          mutate(project_id = str_remove_all(project_id, "TCGA-")) %>% 
+#                                                          inner_join(., f3_supp, by = "project_id") %>% 
+#                                                          split(., .$quadrant)
+#                                                        )
+# 
+# cluster_cor_ind$stem_counts_table %>% 
+#   purrr::reduce(., rbind) %>% 
+#   mutate(pan.samplesID = str_sub(cases, 1, 12)) %>%
+#   inner_join(., subtypes, 
+#              by = "pan.samplesID") %>% 
+#   filter(!is.na(Subtype_Selected), 
+#          Stemness %in% c("ESC", "Normal"), 
+#          project_id == "COAD") %>%
+#   ggplot(., 
+#          aes(x = Stemness, 
+#              fill = Subtype_Selected)
+#          ) + 
+#   geom_bar(color = "grey30", 
+#            position = position_dodge(0.65)) + 
+#   facet_grid(project_id ~ ., 
+#              scales = "free")
+```
+
+```{r, eval=FALSE}
+# Defined by TCGA studies
+#subtypes_tcga_lgg <- TCGAbiolinks::TCGAquery_subtype(tumor = "lgg")
+# subtypes_tcga_lusc <- TCGAbiolinks::TCGAquery_subtype(tumor = "lusc")
+```
+

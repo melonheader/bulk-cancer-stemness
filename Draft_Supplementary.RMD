@@ -1,0 +1,792 @@
+---
+title: |
+  | \vspace{5cm} Transcriptome analysis reveals high tumor heterogeneity with respect to re-activation of stemness and proliferation programs
+  | \vspace{5cm} \LARGE{Supplementary Materials}
+author: "ab"
+date: '`r format(as.POSIXct(if ("" != Sys.getenv("SOURCE_DATE_EPOCH")) { as.numeric(Sys.getenv("SOURCE_DATE_EPOCH")) } else { Sys.time() }, origin="1970-01-01"), "%Y-%m-%d %H:%M:%S")`'
+output:
+  pdf_document:
+    latex_engine: xelatex 
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+# ---------------------------------------------------------------------------- #
+# settings
+knitr::opts_chunk$set(echo = FALSE)
+
+# Global settings
+base.size <- 14
+sox_incl <- FALSE
+```
+
+```{r, include=FALSE}
+# ---------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------- #
+# packages
+require(tidyverse)
+require(magrittr)
+require(janitor)
+require(ggrepel)
+require(RColorBrewer)
+require(reshape2)
+require(patchwork)
+
+# ---------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------- #
+# paths
+f_path <- file.path("~/Scripts/Scripts/Draft")
+a_path <- file.path("~/Scripts/Utility")
+c_path <- file.path("/local/artem/Data/Counts")
+
+# ---------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------- #
+# functinos
+source(file.path(f_path, "F_stemtcga.R"))
+source(file.path(f_path, "F_auxiliary.R"))
+source(file.path(f_path, "F_plotting.R"))
+source(file.path(a_path, "F_miscellaneous.R"))
+```
+
+```{r, include=FALSE}
+#
+# ---------------------------------------------------------------------------- #
+total_exp_ann <- read_tsv("/local/artem/Projects/Draft/Data/Counts/total_norm_counts_t.tsv", 
+                          col_names = TRUE,
+                          col_types = cols(
+  .default = col_double(),
+  cases = col_character(),
+  project_id = col_character(),
+  sample_type = col_character(),
+  site_of_resection_or_biopsy = col_character(),
+  primary_diagnosis = col_character(),
+  gender = col_character()
+))
+#
+medians_table <- read_tsv("/local/artem/Projects/Draft/Data/Counts/Medians_Table.tsv", 
+                          col_names = TRUE, 
+                          col_types = cols(
+  GeneID = col_character(),
+  Group = col_character(),
+  Log2CPM = col_double()
+))
+
+# data
+# ---------------------------------------------------------------------------- #
+data_total <- load_data(short = TRUE)
+exp_tables <- list()
+exp_tables[["exp"]] <- data_total$Norm_Counts
+exp_tables[["ctr"]] <- purrr::map(c("Stem", "Prol", "EMT"), 
+                                  ~ pull_rgenes(total_exp_ann, markers = data_total$Markers, gene_set = .x, size = 5000))
+
+if (sox_incl == FALSE) {
+  exp_tables$exp$stem_counts_table <- exp_tables$exp$stem_counts_table %>% dplyr::select(-contains("ENSG00000181449"))
+}
+
+# regress out effects of tumor purtiy
+exp_tables_cor <- purrr::map(exp_tables, 
+                             ~ purrr::map(.x, 
+                                          ~ correct_cpe(.x, 
+                                                        purity = data_total$Purity, 
+                                                        correct = TRUE, 
+                                                        version = 3)))
+# prepare pca
+pca_tables_cor <- purrr::map(exp_tables_cor, 
+                             ~ purrr::map(.x, 
+                                          ~ do_pca(.x)))
+pca_tables <- purrr::map(exp_tables, 
+                         ~ purrr::map(.x, 
+                                      ~ do_pca(.x)))
+# extract clusters
+cluster_cor <- purrr::map(pca_tables_cor[["exp"]], 
+                          function(x) get_clusters(x[[1]], 
+                                                   reverse = ifelse(x[[1]]$gene_set[1] == "Stemness" | x[[1]]$gene_set[1] == "Proliferation", 
+                                                                    TRUE, 
+                                                                    FALSE)))
+```
+
+\newpage
+```{r, echo=FALSE, warning=FALSE, fig.width=8, fig.height=5}
+# spanel 1
+dotplot_purity(data_total$Purity, 
+               aspect.ratio = 0.7, 
+               base_size = base.size)
+```
+**Supplementary figure 1.**
+
+\newpage
+# Supplementary Figure 2
+```{r, echo=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+# spanel 2
+sp2 <- list()
+sp2[[1]] <- hist_medians(medians_table)
+sp2[[2]] <- scatter_medians(medians_table)
+# ---------------------------------------------------------------------------- #
+sp2[[1]] + sp2[[2]] + 
+  plot_layout(ncol = 2) + 
+  plot_annotation(tag_levels = "A")
+```
+
+\newpage
+# Supplementary Figure 3
+```{r, include=FALSE}
+# spanel 3
+sp3_g <- purrr::map(c("SALL4", "POU5F1", "CBX7"), 
+                    function(x) gradient_pca(exp_tables[["exp"]][[1]], purity = data_total$Purity, gene = x))
+sp3_b <- purrr::map(c("SALL4", "POU5F1", "CBX7"), 
+                    function(x) quantile_pca(exp_tables[["exp"]][[1]], purity = data_total$Purity, gene = x))
+```
+
+
+```{r, echo=FALSE, warning=FALSE, fig.width=10, fig.height=10}
+# ---------------------------------------------------------------------------- #
+sp3_g[[1]] + sp3_b[[1]] + sp3_g[[2]] + sp3_b[[2]] + sp3_g[[3]] + sp3_b[[3]] + 
+  plot_layout(nrow = 3, ncol = 2) + 
+  plot_annotation(tag_levels = "A")
+```
+
+\newpage
+# Supplementary Figure 4
+```{r, include=FALSE}
+sf4 <- purrr::map(c(1, 2), 
+                  ~ plot_loadings(exp_tables[["exp"]][[.x]], data_total$Purity))
+
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.width=10, fig.height=4}
+sf4[[1]] + sf4[[2]] + plot_layout(ncol = 2) + plot_annotation(tag_levels = "A")
+```
+**Supplementary Figure 4. Top 10 genes with maximum loadings into PC1 in Stemness PCA (A) and Proliferation PCA (B).**
+
+\newpage
+# Supplementary Figure 5
+```{r, include=FALSE}
+sp5 <- gene_boxppr(total_exp_table = total_exp_ann, purity = data_total$Purity, 
+                   genes = c("SALL1", "SALL4", "SOX2", "POU5F1"), 
+                   base_size = base.size, 
+                   aspect.ratio = 0.4)
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.width=10, fig.height=12}
+sp5
+```
+
+\newpage
+# Supplementary figure 6
+```{r, include=FALSE}
+##
+emt_p <- purrr::map(c("ZEB1", "ZEB2", "SNAI1", "TCF3", "GRHL3", "GRHL2"), 
+                    ~ gradient_pca(exp_tables[["exp"]][[3]], purity = data_total$Purity, gene = .x, base_size = base.size))
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.width=10, fig.height=10}
+emt_p[[1]] + emt_p[[2]] + emt_p[[3]] + emt_p[[4]] + emt_p[[5]] + emt_p[[6]] + 
+  plot_layout(ncol = 2, nrow = 3) + 
+  plot_annotation(tag_levels = "A")
+```
+
+
+\newpage
+# Supplementary Figure 7
+```{r, include=FALSE}
+sf7_m <- plot_lung_main(exp_tables_cor$exp$stem_counts_table, base_size = base.size)
+sf7_g1 <- plot_lung_gradient(exp_tables_cor$exp$stem_counts_table, gene = "SALL4")
+sf7_g2 <- plot_lung_gradient(exp_tables_cor$exp$stem_counts_table, gene = "CBX7")
+sf7_g3 <- plot_lung_gradient(exp_tables_cor$exp$stem_counts_table, gene = "SOX2")
+sf7_g4 <- plot_lung_gradient(exp_tables_cor$exp$stem_counts_table, gene = "POU5F1")
+
+```
+
+```{r, fig.width=11, fig.height=11}
+sf7_m + sf7_g1 + sf7_g2 + sf7_g3 + plot_layout(nrow = 2, ncol = 2)
+```
+
+```{r}
+# LUSC vs LUAD DE
+## vars
+path_to_data <- "/local/artem/Projects/Draft/Data/" 
+comps <- c("LUSC", "LUAD")
+lfc_cutoff <- 1
+cts_cutoff <- 10
+
+##
+paths <- list.files(file.path(path_to_data, "Counts", "GDCprocessed"), 
+                      pattern = paste(comps, collapse = "|"), 
+                      full.names = TRUE)
+meta <- read_tsv(file.path(path_to_data, "Meta", "Meta.tsv"), 
+                   col_names = TRUE, 
+                   col_types = cols(.default = col_character()))
+##
+exp_tab <- purrr::map(paths, 
+                        ~ read_tsv(.x, 
+                                   col_names = TRUE, 
+                                   col_types = cols(.default = col_double(), 
+                                                    GeneID = col_character()))) %>% 
+    purrr::reduce(., inner_join, by = "GeneID")
+##
+group <- meta %>% 
+    dplyr::filter(cases %in% colnames(exp_tab[, -1]), 
+                  sample_type != "Solid Tissue Normal") %>% 
+    dplyr::select(cases, project_id)
+##
+exp_tab <- exp_tab %>% dplyr::select(c("GeneID", group$cases))
+##
+group <- group %>% 
+  `[`(order(match(.$cases, names(exp_tab[, -1]))), ) %>% 
+  pull(project_id) %>% 
+  str_remove_all("TCGA-")
+group <- factor(group, levels = comps)
+##
+y <- edgeR::DGEList(exp_tab[,-1], 
+                    group = group,
+                    genes = exp_tab[, 1, drop = FALSE])
+## add genenames
+library(org.Hs.eg.db)
+y$genes$GeneName <- mapIds(org.Hs.eg.db, 
+                           y$genes$GeneID,
+                           keytype = "ENSEMBL", 
+                           column = "SYMBOL")
+## drop nas
+y <- y[!is.na(y$genes$GeneName), ]
+## set up comparisons
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+## filter
+keep <- edgeR::filterByExpr(y, design, 
+                            min.count = cts_cutoff)
+y <- y[keep, , keep.lib.sizes = FALSE]
+## estimate dispersion
+y <- edgeR::estimateDisp(y, design, robust = TRUE)
+## fit glm
+fit <- edgeR::glmQLFit(y, design, robust = TRUE)
+## test for DE genes
+contrast <- c(1, -1)
+dim(contrast) <- c(2, 1)
+rownames(contrast) <- c(c(comps[2], comps[1]))
+colnames(contrast) <- paste0(comps[1], "_vs_", comps[2])
+## estimate de
+tr <- edgeR::glmTreat(fit, contrast = contrast, lfc = lfc_cutoff)
+## out
+is.de <- edgeR::decideTestsDGE(tr)
+summary(is.de)
+```
+
+```{r}
+# set up tabs
+##
+de_lung_tab <- cbind(tr$genes, 
+                     tr$table) %>% 
+  as_tibble()
+de_lung_tab$Padj <- p.adjust(de_lung_tab$PValue, method = "fdr")
+##
+gene_vec <- de_lung_tab[["logFC"]]
+names(gene_vec)<- mapIds(org.Hs.eg.db, 
+                         de_lung_tab[["GeneID"]],
+                         keytype = "ENSEMBL",
+                         column = "ENTREZID")
+gene_vec <- sort(gene_vec, decreasing = TRUE)
+write_tsv(de_lung_tab, "/local/artem/Projects/Draft/Data/de_LUSCvsLUAD.tsv", col_names = T)
+```
+
+```{r}
+# GSEA
+require(clusterProfiler)
+lung_gse <- gseGO(geneList     = gene_vec,
+                  OrgDb        = org.Hs.eg.db,
+                  ont          = "BP",
+                  nPerm        = 1000,
+                  minGSSize    = 100,
+                  maxGSSize    = 500,
+                  pvalueCutoff = 0.05,
+                  verbose      = FALSE)
+```
+
+```{r, fig.height=12, fig.width=10}
+ridgeplot(lung_gse, showCategory = 30, fill = "qvalue", )
+```
+
+
+```{r}
+# separate GO 
+deg_lusc <- de_lung_tab %>% 
+  filter(logFC > 1 & Padj < 0.05) %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+deg_luad <- de_lung_tab %>% 
+  filter(logFC < -1 & Padj < 0.05) %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+bgd <- de_lung_tab %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+
+
+## LUSC
+ego_lusc <- enrichGO(gene          = deg_lusc,
+                     universe      = bgd,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+## LUAD
+ego_luad <- enrichGO(gene          = deg_luad,
+                     universe      = bgd,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+
+```
+
+```{r}
+barplot(ego_lusc, showCategory = 20) + theme_tcga(aspect.ratio = 1, base_size = base.size, angle.t.y = 0)
+```
+
+```{r, fig.width=9}
+barplot(ego_luad, showCategory = 20)
+```
+
+```{r}
+# stage 4 vs stage 1
+group <- meta %>% 
+  dplyr::filter(cases %in% colnames(exp_tab[, -1]), 
+                tumor_stage != "not reported", 
+                sample_type != "Solid Tissue Normal") %>% 
+  dplyr::select(cases, tumor_stage, project_id) %>% 
+  mutate(project_id = str_remove_all(project_id, "TCGA-"), 
+         tumor_stage = str_remove_all(tumor_stage, "stage "), 
+         tumor_stage = str_remove_all(tumor_stage, "a|b"), 
+         tumor_stage_simp = ifelse(tumor_stage == "i", "I", "II"), 
+         de_var = str_c(project_id, tumor_stage_simp, sep = "_"))
+##
+exp_tab_upd <- exp_tab %>% dplyr::select(c("GeneID", group$cases)) 
+##
+group <- group %>%
+  `[`(order(match(.$cases, names(exp_tab_upd[, -1]))), ) %>% 
+   pull(de_var)
+group <- factor(group, levels = c("LUSC_II", "LUSC_I", "LUAD_II", "LUAD_I"))
+```
+
+```{r}
+# check for de between stages
+##
+y <- edgeR::DGEList(exp_tab_upd[,-1], 
+                    group = group,
+                    genes = exp_tab_upd[, 1, drop = FALSE])
+# add genenames
+library(org.Hs.eg.db)
+y$genes$GeneName <- mapIds(org.Hs.eg.db, 
+                           y$genes$GeneID,
+                           keytype = "ENSEMBL", 
+                           column = "SYMBOL")
+# drop nas
+y <- y[!is.na(y$genes$GeneName), ]
+# set up comparisons
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+# filter
+keep <- edgeR::filterByExpr(y, design, 
+                            min.count = cts_cutoff)
+y <- y[keep, , keep.lib.sizes = FALSE]
+# estimate dispersion
+y <- edgeR::estimateDisp(y, design, robust = TRUE)
+# fit glm
+fit <- edgeR::glmQLFit(y, design, robust = TRUE)
+# test for DE genes between stages
+con <- limma::makeContrasts(LUAD.IIvsI = LUAD_II - LUAD_I,
+                            LUSC.IIvsI = LUSC_II - LUSC_I, 
+                            levels = design)
+## estimate de
+res_stages <- glmQLFTest(fit, contrast = con)
+# check (LUSC.stage4 vs LUSC.stage1) vs (LUAD.stage4 vs LUAD.stage1)
+con <- limma::makeContrasts((LUSC_II - LUSC_I) - (LUAD_II - LUAD_I), 
+                            levels = design)
+## estimate de
+res_stages_dif <- glmQLFTest(fit, contrast = con)
+## out
+is.de <- edgeR::decideTestsDGE(res_stages_dif)
+summary(is.de)
+```
+
+```{r}
+de_stages_tab <- cbind(res_stages$genes, 
+                       res_stages$table) %>% 
+  as_tibble()
+de_stages_tab$Padj <- p.adjust(de_stages_tab$PValue, method = "fdr")
+```
+
+```{r}
+# separate GO 
+deg_lusc <- de_stages_tab %>% 
+  filter(logFC.LUSC.IIvsI > 1 & Padj < 0.05) %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+deg_luad <- de_stages_tab %>% 
+  filter(logFC.LUAD.IIvsI > 1 & Padj < 0.05) %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+bgd <- de_stages_tab %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+
+
+## LUSC
+ego_lusc <- enrichGO(gene          = deg_lusc,
+                     universe      = bgd,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+## LUAD
+ego_luad <- enrichGO(gene          = deg_luad,
+                     universe      = bgd,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+
+```
+
+```{r, fig.width=9}
+barplot(ego_lusc, showCategory = 20)
+```
+
+```{r, fig.width=9}
+barplot(ego_luad, showCategory = 20)
+```
+
+
+```{r}
+de_stages_dif_tab <- cbind(res_stages_dif$genes, 
+                           res_stages_dif$table) %>% 
+  as_tibble()
+de_stages_dif_tab$Padj <- p.adjust(de_stages_dif_tab$PValue, method = "fdr")
+```
+
+```{r}
+# separate GO 
+deg_lusc_st <- de_stages_dif_tab %>% 
+  filter(logFC > 1 & Padj < 0.05) %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+deg_luad_st <- de_stages_dif_tab %>% 
+  filter(logFC < -1 & Padj < 0.05) %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+bgd <- de_stages_dif_tab %>% 
+  pull(GeneID) %>% 
+  mapIds(org.Hs.eg.db, 
+         .,
+         keytype = "ENSEMBL", 
+         column = "ENTREZID")
+
+
+## LUSC
+ego_lusc <- enrichGO(gene          = deg_lusc_st,
+                     universe      = bgd,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+## LUAD
+ego_luad <- enrichGO(gene          = deg_luad_st,
+                     universe      = bgd,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+
+```
+
+```{r, fig.width=9}
+barplot(ego_lusc, showCategory = 20)
+```
+
+```{r, fig.width=9}
+barplot(ego_luad, showCategory = 20)
+```
+
+
+
+
+\newpage
+# Supplementary Figure 8
+```{r, echo=FALSE, warning=FALSE, fig.width=20, fig.height=14}
+## anova results
+sf8 <- purrr::map(c("Stemness", "Proliferation"), 
+                  ~ anova_tuk(pca_tables_cor[["exp"]], signature = .x))
+
+sf8_1 <- purrr::map2(sf8, 
+                     c("Stemness", "Proliferation"),
+                     ~ plot_tuk(.x[[1]], .y))
+
+## NS comparisons tabs
+sf8_tabs <- purrr::map(sf8, 
+                      ~ .x[[1]] %>% filter(sf == "NS") %>% ggpubr::ggtexttable(x = ., 
+                                                                               rows = NULL, 
+                                                                               theme = ttheme("minimal")))
+
+
+
+sf8_1[[1]] + sf8_1[[2]] + (sf8[[1]][[2]] + sf8[[2]][[2]]) + plot_layout(ncol = 1, heights = c(2, 2, 1.8)) + plot_annotation(tag_levels = "A")
+```
+**Supplementary Figure 8A. Differences and confidence intervals from Tukey's Post hoc test (A-B) and distribution of differences between PC1 means (C-D)**
+
+```{r, echo=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+get_tuk_matrix <- function(anova_tuk_res) {
+  tab <- purrr::map(list(c(1, 2), c(2, 1)), 
+                    ~ anova_tuk_res %>% mutate(comp_l = str_split_fixed(pair, "-", 2)[, .x[1]], 
+                                               comp_r = str_split_fixed(pair, "-", 2)[, .x[2]]) %>% 
+                      dplyr::select(comp_l, comp_r, p_adj = `p adj`, diff)) %>% set_names(c("t", "f"))
+  tab_tuk <- rbind(tab[["t"]], tab[["f"]]) %>% rbind(tibble(comp_l = unique(c(tab[["t"]]$comp_l, tab[["f"]]$comp_l)), 
+                                                            comp_r = unique(c(tab[["t"]]$comp_l, tab[["f"]]$comp_l)), 
+                                                            p_adj = 1, 
+                                                            diff = 0))
+  tibl_tuk <- purrr::map(tab_tuk %>% distinct(comp_l) %>% pull(comp_l), 
+                         ~ tab_tuk %>% filter(comp_l == .x) %>% arrange(comp_r) %>% dplyr::select(comp_r, !!sym(.x) := diff)) %>% 
+    purrr::reduce(., inner_join, by = "comp_r") %>% 
+    dplyr::select(c("comp_r", tab_tuk %>% distinct(comp_l) %>% arrange(comp_l) %>% pull(comp_l)))
+  matr_tuk <- tibl_tuk[, -1] %>% as.matrix() %>% `rownames<-`(tibl_tuk$comp_r)
+  return(matr_tuk)
+}
+matr_stem <- get_tuk_matrix(sf8[[1]][[1]])
+matr_prol <- get_tuk_matrix(sf8[[2]][[1]])
+#require(Matrix)
+#matr_stem <- tril(matr_stem, -1)
+#matr_prol <- triu(matr_prol, 1)
+#matr_comb <- matr_stem + matr_prol
+```
+
+```{r}
+obj1 <- pheatmap::pheatmap(as.matrix(matr_stem))
+```
+**Supplementary Figure 8B. Differences and confidence intervals from Tukey's Post hoc test (A-B) and distribution of differences between PC1 means (C-D)**
+
+```{r}
+obj2 <- pheatmap::pheatmap(as.matrix(matr_prol))
+```
+**Supplementary Figure 8C. Differences and confidence intervals from Tukey's Post hoc test (A-B) and distribution of differences between PC1 means (C-D)**
+
+
+\newpage
+# Supplementary Figure 9
+```{r, echo=FALSE, warning=FALSE, fig.width=12, fig.height=10}
+# Higher order PCs of stemness PCA
+sp9 <- purrr::map2(.x = c(1, 1, 2, 2, 3, 3), 
+                   .y = list(c("PC2", "PC3"), c("PC3", "PC4"), 
+                             c("PC2", "PC3"), c("PC3", "PC4"), 
+                             c("PC2", "PC3"), c("PC3", "PC4")), 
+                   .f = function(x, y) plot_nice_pca(pca_tables_cor[["exp"]][[x]], 
+                                                     pcs = y, 
+                                                     density = F))
+# ---------------------------------------------------------------------------- #
+  sp9[[1]] + sp9[[2]] + 
+  sp9[[3]] + sp9[[4]] +
+  sp9[[5]] + sp9[[6]] + plot_layout(nrow = 3, ncol = 2) + 
+  plot_annotation(tag_levels = "A")
+```
+**Supplementary Figure 9. Higher order PCs for Stemness (A-B), Proliferation (C-D) and EMT (E-F) signatures.**
+
+\newpage
+# Supplementary Figure 10
+```{r, echo=FALSE, warning=FALSE, fig.width=16, fig.height=10}
+# Control over random genes
+sp10 <- purrr::map2(.x = c(1, 1, 2, 2, 3, 3), 
+                   .y = c(F, T, F, T, F, T), 
+                   .f = function(x, y) plot_nice_pca(pca_tables_cor[["ctr"]][[x]], 
+                                                     pcs = c("PC1", "PC2"), 
+                                                     density = y))
+# ---------------------------------------------------------------------------- #
+  sp10[[1]] + sp10[[3]] + sp10[[5]] + 
+    sp10[[2]] + sp10[[4]] + sp10[[6]] + 
+    plot_layout(nrow = 2, ncol = 3) + 
+    plot_annotation(tag_levels = "A")
+```
+**Supplementary Figure 10. PCA performed on the three sets of random genes.**
+
+
+
+\newpage
+# Supplementary Figure 12 - should be rewritten
+```{r, echo=FALSE, warning=FALSE, fig.width=12, fig.height=7}
+meta_tab <- data_total$Meta %>% filter(grepl("TCGA", project_id), 
+                           !tumor_stage %in% c("-", "--", "i/ii nos", "is", "not reported", "stage 0", "stage x")) %>% 
+  mutate(tumor_stage_simp = str_count(tumor_stage, "i"), 
+         tumor_stage_simp = ifelse(grepl("iv", tumor_stage), 4, tumor_stage_simp))
+
+
+signature = "stem|prol"
+# select signature
+choice <- names(pca_tables_cor[["exp"]]) %>% grep(signature, ., ignore.case = TRUE, value = TRUE)
+## one-way ANOVA for PC1 and projects
+tab <- purrr::map(choice, 
+                  ~ pca_tables_cor[["exp"]][[.x]][[1]] %>% 
+                    dplyr::select(2:9) %>% 
+                    inner_join(., meta_tab[, c("cases", "tumor_stage_simp")], by = "cases") %>% 
+                    mutate(PC1 = -1 * PC1, 
+                           project_id = str_remove_all(project_id, "TCGA-"), 
+                           PC1_scaled = norm_to_one(PC1)) %>% 
+                    dplyr::rename(!!sym(paste0("PC1_", str_split_fixed(.x, "_", 2)[, 1])) := PC1, 
+                                  !!sym(paste0("PC1_scaled_", str_split_fixed(.x, "_", 2)[, 1])) := PC1_scaled)) %>% 
+  purrr::reduce(., inner_join, 
+                by = c("cases", "project_id", "sample_type", "site_of_resection_or_biopsy", "primary_diagnosis", "gender", "tumor_stage_simp"))
+
+## stratify
+group_of3 <- c("BLCA", "BRCA", "LIHC", "LUSC") # separate for modelling
+samps_to_drop <- map2(group_of3, 
+                      c(1, 4, 4, 4), 
+                      ~ tab %>% filter(project_id %in% .x & tumor_stage_simp == .y) %>% pull(cases)) %>% 
+  purrr::reduce(., c)
+
+plot_tab <- tab %>% 
+  filter(!project_id %in% c("ESCA", "PAAD", "STAD", "KICH"), 
+         !cases %in% samps_to_drop, 
+         sample_type != "Solid Tissue Normal") %>% 
+  mutate(stage_group = ifelse(project_id %in% group_of3, "three_levels", "four_levels"), 
+         tumor_stage_simp = factor(tumor_stage_simp, levels = c("1", "2", "3", "4"))) %>% 
+  as_tibble()
+  
+
+plot_tab %>% 
+  gather(contains("PC1"), key = "signature", value = "PC1") %>% 
+ggplot(data = .) + 
+  geom_boxplot(aes(x = project_id, y = PC1, fill = tumor_stage_simp), position = "dodge") + 
+  facet_grid(signature ~ stage_group, scales = "free") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+
+```
+**Supplementary Figure 12. Box-plots of PC1 stratified by tumor type and tumor stage. (Higher value of PC1 indicates proximity to iPSC)**
+
+\newpage
+```{r, include=FALSE}
+## anova 
+# resection site as a random effect - drop small groups
+sites_to_keep <- plot_tab %>% tabyl(site_of_resection_or_biopsy) %>% filter(n > 10) %>% pull(site_of_resection_or_biopsy)
+# subset
+tab_m <- plot_tab %>% filter(stage_group == "four_levels", 
+                             site_of_resection_or_biopsy %in% sites_to_keep) 
+# model
+fm1_stem <- lme4::lmer(PC1_scaled_stem ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp + (1 | site_of_resection_or_biopsy), tab_m)
+fm1_prolif <- lme4::lmer(PC1_scaled_prolif ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp + (1 | site_of_resection_or_biopsy), tab_m)
+# TukeyHSD
+emmeans::emm_options(lmerTest.limit = 7000)
+emm_m_stem <- emmeans::emmeans(fm1_stem, list(pairwise ~ project_id*tumor_stage_simp), adjust = "tukey", pbkrtest.limit = 7000)
+emm_m_prolif <- emmeans::emmeans(fm1_prolif, list(pairwise ~ project_id*tumor_stage_simp), adjust = "tukey", pbkrtest.limit = 7000)
+
+# subset and model - now with 3 levels
+#tab_n <- plot_tab %>% filter(stage_group == "three_levels", 
+#                             site_of_resection_or_biopsy %in% sites_to_keep) 
+# for BLCA we labeled stages 2, 3, 4 as 1, 2, 3 under assumption that tumor stage should be growing with PC1 
+#tab_n %<>% mutate(tumor_stage_simp = ifelse(project_id == "BLCA", (as.numeric(tumor_stage_simp) - 1), tumor_stage_simp), 
+#                  tumor_stage_simp = factor(tumor_stage_simp, levels = c(1, 2, 3)))
+#fm2 <- lme4::lmer(PC1 ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp + (1 | site_of_resection_or_biopsy), tab_n)
+#
+#emm_n <- emmeans(fm2, list(pairwise ~ project_id*tumor_stage_simp), adjust = "tukey", pbkrtest.limit = 7000)
+```
+
+```{r, warning=FALSE}
+sf111 <-  plot_diff_bar(emm_m_stem)
+sf112 <- plot_diff_bar(emm_m_prolif)
+
+sf111
+```
+**Supplementary Figure 11A. Bar plots showing difference from mean PC1 (Stemness signature) of Tumor stage 1 per project (for tumors with four tumor stages available).**
+
+```{r}
+sf112
+```
+**Supplementary Figure 11A. Bar plots showing difference from mean PC1 (Proliferation signature) of Tumor stage 1 per project (for tumors with four tumor stages available).**
+
+```{r}
+## model as ancova 
+tab_m_n <- plot_tab %>% filter(site_of_resection_or_biopsy %in% sites_to_keep) %>% mutate(tumor_stage_simp = as.numeric(as.character(tumor_stage_simp)))
+
+stage_ancova <- list()
+stage_ancova[["Stem_Scaled"]] <- aov(PC1_scaled_stem ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp, data = tab_m_n)
+stage_ancova[["Prolif_Scaled"]] <- aov(PC1_scaled_prolif ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp, data = tab_m_n)
+stage_ancova[["Stem"]] <- aov(PC1_stem ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp, data = tab_m_n)
+stage_ancova[["Prolif"]] <- aov(PC1_prolif ~ project_id + tumor_stage_simp + project_id:tumor_stage_simp, data = tab_m_n)
+```
+
+```{r}
+coef(stage_ancova[["Stem_Scaled"]])
+```
+
+```{r}
+summary(stage_ancova[["Stem_Scaled"]])
+```
+
+```{r}
+summary(stage_ancova[["Prolif_Scaled"]])
+```
+
+
+```{r}
+coef_tab <- tibble(tumor_stage_coef = names(coef(stage_ancova[["Stem"]])), 
+                   Stemness = unname(coef(stage_ancova[["Stem_Scaled"]])), 
+                   Proliferation = unname(coef(stage_ancova[["Prolif_Scaled"]]))) %>% 
+  dplyr::filter(grepl(":tumor_stage_simp", tumor_stage_coef)) %>% 
+  dplyr::mutate(tumor_stage_coef = str_remove_all(tumor_stage_coef, "project_id")) %>%
+  dplyr::mutate(tumor_stage_coef = str_remove_all(tumor_stage_coef, ":tumor_stage_simp")) %>%
+  gather("Stemness", "Proliferation", key = "Signature", value = "coef_value")
+```
+
+```{r}
+ggplot(data = coef_tab, 
+       aes(x = tumor_stage_coef, 
+           y = coef_value, 
+           fill = Signature)) +
+  geom_col(position = "dodge2", 
+           size = 0.5) +
+  scale_fill_grey() + 
+  theme_tcga(aspect.ratio = 0.7, base_size = 14) +
+  labs(y = "Coefficient value", x = "effect of tumor_stage in")
+```
+**Supplementary Figure 13. ANCOVA results**
+
+
+
+
+
+
+
+
+
+
+
